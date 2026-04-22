@@ -1,5 +1,7 @@
 # XLSX Aggregator
 
+**Репозиторий:** [github.com/DenisYermakov/xlsx-aggregator](https://github.com/DenisYermakov/xlsx-aggregator)
+
 Десктопное приложение для Windows, которое консолидирует данные из листов Excel в `YW2PF`, строит таблицу счетов (JOIN `SCPF` + опционально `S5PF`) и безопасно перезаписывает исходный `.xlsx` с резервной копией.
 
 ## Требования

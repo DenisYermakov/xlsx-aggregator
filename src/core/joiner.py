@@ -5,11 +5,20 @@ from __future__ import annotations
 import pandas as pd
 from loguru import logger
 
-from src.core.config import SCPF_MERGE_COLUMNS, S5PF_MERGE_COLUMNS
+from src.core.config import (
+    ACCOUNT_FIELD_KEY_HEADER,
+    ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED,
+    SCPF_MERGE_COLUMNS,
+    S5PF_MERGE_COLUMNS,
+)
+
+_ACCOUNT_COL_ORDER: dict[tuple[str, str, str], int] = {
+    t: i for i, t in enumerate(ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED)
+}
 
 
 def build_account_table(
-    accounts: set[tuple[str, str, str]],
+    accounts: set[tuple[tuple[str, str, str], tuple[str, str, str]]],
     sc_rows: list[dict],
     s5_rows: list[dict],
 ) -> pd.DataFrame:
@@ -21,7 +30,8 @@ def build_account_table(
     Нормализация ключей: компоненты приводятся к строке и ``.strip()``.
 
     Args:
-        accounts: Уникальные тройки из ``extract_all_accounts``.
+        accounts: Уникальные пары ``(тройка имён колонок PF, (SCAB, SCAN, SCAS))``
+            из ``extract_all_accounts``.
         sc_rows: Все data-строки SCPF.
         s5_rows: Все data-строки S5PF (могут отсутствовать часть счетов — штатно).
 
@@ -32,6 +42,7 @@ def build_account_table(
     if not accounts:
         return pd.DataFrame(
             columns=[
+                ACCOUNT_FIELD_KEY_HEADER,
                 "SCAB",
                 "SCAN",
                 "SCAS",
@@ -50,7 +61,24 @@ def build_account_table(
             ]
         )
 
-    acc_df = pd.DataFrame(list(accounts), columns=["SCAB", "SCAN", "SCAS"])
+    def _acc_sort_key(
+        item: tuple[tuple[str, str, str], tuple[str, str, str]],
+    ) -> tuple[int, tuple[str, str, str]]:
+        cols, _vals = item
+        return (_ACCOUNT_COL_ORDER.get(cols, 10**9), cols)
+
+    rows_sorted = sorted(accounts, key=_acc_sort_key)
+    acc_df = pd.DataFrame(
+        [
+            {
+                ACCOUNT_FIELD_KEY_HEADER: f"{a}-{b}-{c}",
+                "SCAB": v[0],
+                "SCAN": v[1],
+                "SCAS": v[2],
+            }
+            for (a, b, c), v in rows_sorted
+        ],
+    )
     sc_df = pd.DataFrame(sc_rows)
     s5_df = pd.DataFrame(s5_rows)
 
@@ -113,6 +141,7 @@ def build_account_table(
 
     merged = merged[
         [
+            ACCOUNT_FIELD_KEY_HEADER,
             "SCAB",
             "SCAN",
             "SCAS",

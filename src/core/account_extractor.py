@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from src.core.config import ACCOUNT_SOURCE_SHEETS, SHEET_FIELD_PREFIX
+from src.core.config import (
+    ACCOUNT_SOURCE_SHEETS,
+    ALLOWED_ACCOUNT_FIELD_TRIPLES,
+    SHEET_FIELD_PREFIX,
+)
 
 
 def _norm(v: object) -> str:
@@ -29,7 +33,7 @@ def extract_account_slots(
         или аналогично для B с ``BB, BN, BS``.
     """
     slots: dict[str, dict[str, str]] = {}
-    pat = re.compile(rf"^{re.escape(sheet_prefix)}(AB|AN|AS|BB|BN|BS)(.+)$")
+    pat = re.compile(rf"^{re.escape(sheet_prefix)}(AB|AN|AS|BB|BN|BS)(.*)$")
     for h in headers:
         if h is None:
             continue
@@ -54,7 +58,7 @@ def extract_account_slots(
 
 def extract_all_accounts(
     sheets: dict[str, list[dict[str, object]]],
-) -> set[tuple[str, str, str]]:
+) -> set[tuple[tuple[str, str, str], tuple[str, str, str]]]:
     """Извлекает уникальные ключи счетов со всех sheet-источников.
 
     ТЗ: «На Листах YW2PF, YW3PF и YWJ1PF указаны счета. Ключ счета равен
@@ -64,16 +68,18 @@ def extract_all_accounts(
         1. Для каждого листа (YW2PF, YW3PF, YWJ1PF) по префиксу
            (YW2/YW3/YWJ1) находим слоты с полными тройками.
         2. Берём только слоты, где присутствуют ВСЕ ТРИ поля тройки.
-        3. Группы A и B сливаются в один set троек для JOIN с SCAB/SCAN/SCAS.
-        4. Пустые тройки (все три компонента = "") не добавляем.
+        3. Учитываются только тройки колонок из ``ALLOWED_ACCOUNT_FIELD_TRIPLES``.
+        4. Группы A и B сливаются в один set пар
+           ``(имена_колонок_AB_AN_AS, значения_для_JOIN)``.
+        5. Пустые тройки значений (все три компонента = "") не добавляем.
 
     Args:
         sheets: ``{имя_листа: [row_dict, ...]}`` — как из ``read_sheet_as_dicts``.
 
     Returns:
-        Множество уникальных троек ``(AB, AN, AS)`` как строк.
+        Множество элементов ``((c_AB, c_AN, c_AS), (SCAB, SCAN, SCAS))``.
     """
-    accounts: set[tuple[str, str, str]] = set()
+    accounts: set[tuple[tuple[str, str, str], tuple[str, str, str]]] = set()
     for sheet_name in ACCOUNT_SOURCE_SHEETS:
         prefix_key = sheet_name
         if prefix_key not in SHEET_FIELD_PREFIX:
@@ -86,8 +92,11 @@ def extract_all_accounts(
         slots = extract_account_slots(headers, sheet_prefix)
         for row in rows:
             for _slot_id, _group, (c1, c2, c3) in slots:
+                if (c1, c2, c3) not in ALLOWED_ACCOUNT_FIELD_TRIPLES:
+                    continue
                 v1, v2, v3 = row.get(c1), row.get(c2), row.get(c3)
                 triple = (_norm(v1), _norm(v2), _norm(v3))
                 if any(triple):
-                    accounts.add(triple)
+                    col_key = (c1, c2, c3)
+                    accounts.add((col_key, triple))
     return accounts

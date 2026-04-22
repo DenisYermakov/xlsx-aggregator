@@ -5,10 +5,13 @@ from __future__ import annotations
 import pandas as pd
 
 from src.core.joiner import build_account_table
+from src.core.config import ACCOUNT_FIELD_KEY_HEADER
 
 
 def test_s5_missing_gives_nan() -> None:
-    accounts = {("A", "B", "C")}
+    accounts = {
+        (("YW3AB2", "YW3AN2", "YW3AS2"), ("A", "B", "C")),
+    }
     sc_rows = [
         {
             "SCAB": "A",
@@ -27,6 +30,8 @@ def test_s5_missing_gives_nan() -> None:
     ]
     s5_rows: list[dict] = []
     df = build_account_table(accounts, sc_rows, s5_rows)
+    assert df.columns[0] == ACCOUNT_FIELD_KEY_HEADER
+    assert df.loc[0, ACCOUNT_FIELD_KEY_HEADER] == "YW3AB2-YW3AN2-YW3AS2"
     assert pd.isna(df.loc[0, "S5BAL"])
     assert pd.isna(df.loc[0, "S5AIMD"])
 
@@ -34,3 +39,4 @@ def test_s5_missing_gives_nan() -> None:
 def test_empty_accounts_empty_frame() -> None:
     df = build_account_table(set(), [{"SCAB": "x", "SCAN": "y", "SCAS": "z"}], [])
     assert df.empty
+    assert list(df.columns)[0] == ACCOUNT_FIELD_KEY_HEADER

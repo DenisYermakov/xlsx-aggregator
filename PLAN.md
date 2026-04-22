@@ -9,8 +9,8 @@
 Нужно десктопное приложение для автоматизации консолидации данных в Excel-файле (многолистовом, формат — см. `Пример_файла.xlsx`). Пользователь выбирает файл кнопкой и запускает обработку. Приложение:
 
 1. Дописывает в лист **`YW2PF`** (ниже существующих данных, через пустую строку) блоки данных с других листов;
-2. Собирает список счетов из листов `YW2PF`, `YW3PF`, `YWJ1PF` по маске полей `AB*/AN*/AS*` и `BB*/BN*/BS*`;
-3. Делает LEFT JOIN счетов с листами `SCPF` (всегда) и `S5PF` (если строка найдена), добавляет таблицу со счетами на `YW2PF` и накладывает автофильтр;
+2. Собирает список счетов из листов `YW2PF`, `YW3PF`, `YWJ1PF` по маске полей `AB*/AN*/AS*` и `BB*/BN*/BS*`, **но только для троек колонок из allowlist** (`ALLOWED_ACCOUNT_FIELD_TRIPLES` в `config.py`; порядок вывода задаётся `ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED`);
+3. Делает LEFT JOIN значений счёта с листами `SCPF` (всегда) и `S5PF` (если строка найдена), добавляет таблицу со счетами на `YW2PF`: **первая колонка — «Ключ полей PF»** (три имени колонок листа через дефис, напр. `YW3AB2-YW3AN2-YW3AS2`), далее `SCAB`…`S5AM1D` и вычисляемый столбец; накладывает автофильтр;
 4. **Перезаписывает исходный файл** обработанной версией. Перед записью — автоматически создаёт резервную копию `<имя>.backup_<timestamp>.xlsx` рядом с оригиналом (см. раздел 6.8 «Безопасная перезапись»).
 
 **Формат листов (везде одинаковый):**
@@ -66,7 +66,7 @@ xlsx_aggregator/
 │   │   ├── __init__.py
 │   │   ├── config.py               # константы: имена листов, поля SC/S5
 │   │   ├── sheet_reader.py         # чтение листа → list[dict] по заголовкам
-│   │   ├── account_extractor.py    # вытаскивает тройки (AB, AN, AS) / (BB, BN, BS)
+│   │   ├── account_extractor.py    # слоты AB/AN/AS и BB/BN/BS; allowlist; пары (имена колонок, значения)
 │   │   ├── joiner.py               # pandas-JOIN SCPF + S5PF
 │   │   ├── writer.py               # дозапись блоков в YW2PF + автофильтр
 │   │   └── pipeline.py             # оркестрация всего процесса + safe_overwrite_save
@@ -168,6 +168,18 @@ ACCOUNT_SOURCE_SHEETS = ["YW2PF", "YW3PF", "YWJ1PF"]
 SC_SHEET = "SCPF"   # обязательный источник для таблицы счетов
 S5_SHEET = "S5PF"   # опциональный источник (ТЗ: «не все счета есть в S5PF»)
 
+# Префиксы имён полей по имени листа (строка 2 — заголовки)
+SHEET_FIELD_PREFIX = {"YW2PF": "YW2", "YW3PF": "YW3", "YWJ1PF": "YWJ1"}
+
+# Разрешённые тройки имён колонок (AB/AN/AS или BB/BN/BS) и их порядок в таблице на выходе
+ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED = (
+    ("YW3AB2", "YW3AN2", "YW3AS2"),
+    # … полный перечень в реальном config.py …
+)
+ALLOWED_ACCOUNT_FIELD_TRIPLES = frozenset(ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED)
+
+ACCOUNT_FIELD_KEY_HEADER = "Ключ полей PF"  # первая колонка блока ACCOUNTS
+
 # =============================================================================
 # Метаданные листов (общая структура для всех PF-листов)
 # =============================================================================
@@ -216,6 +228,7 @@ ACCOUNT_PREFIXES_GROUP_B = ("BB", "BN", "BS")
 # =============================================================================
 # Таблица счетов на выходе (колонки в порядке их появления в итоговой таблице)
 # =============================================================================
+# Фактически joiner добавляет ПЕРЕД этим списком колонку ACCOUNT_FIELD_KEY_HEADER.
 # Формат элемента: (имя_колонки_на_выходе, источник)
 # Источники: "SCPF" — из листа SCPF, матчится по (SCAB, SCAN, SCAS)
 #            "S5PF" — из листа S5PF, матчится по (S5AB, S5AN, S5AS) == (SCAB, SCAN, SCAS)
@@ -273,39 +286,33 @@ ACCOUNT_TABLE_COLUMNS = [
 **Пример эталонной документации функции:**
 
 ```python
-def extract_all_accounts(sheets: dict[str, list[dict]]) -> set[tuple[str, str, str]]:
-    """Извлекает уникальные ключи счетов со всех сheet-источников.
+def extract_all_accounts(
+    sheets: dict[str, list[dict]],
+) -> set[tuple[tuple[str, str, str], tuple[str, str, str]]]:
+    """Извлекает уникальные счета со всех sheet-источников.
 
-    ТЗ: «На Листах YW2PF, YW3PF и YWJ1PF указаны счета. Ключ счета равен
-    маске поля AB*,AN*,AS* или BB*,BN*,BS*. Эти поля идут последовательно:
-    YW3AB2, YW3AN2, YW3AS2, YW3AB3, YW3AN3, YW3AS3 и т.д.»
+    ТЗ: «На Листах YW2PF, YW3PF и YWJ1PF указаны счета…» Плюс прикладное правило:
+    учитываются **только** тройки имён колонок из ``ALLOWED_ACCOUNT_FIELD_TRIPLES``.
 
     Алгоритм:
-        1. Для каждого листа (YW2PF, YW3PF, YWJ1PF) по его префиксу
-           (YW2/YW3/YWJ1) находим все тройки полей вида {prefix}{AB|AN|AS}{slot}
-           или {prefix}{BB|BN|BS}{slot}, сгруппированные по slot'у.
-        2. Важно: берём только те слоты, где присутствуют ВСЕ ТРИ поля тройки.
-           Это страхует от ложного срабатывания на полях типа YW3ANR
-           (идентификатор договора, не компонент счёта).
-        3. Группы A (AB/AN/AS) и B (BB/BN/BS) обе сливаются в один общий set
-           троек — при сопоставлении с SCPF/S5PF матчатся по одинаковым
-           колонкам SCAB/SCAN/SCAS независимо от группы происхождения.
-        4. Пустые тройки (все три компонента = "") отбрасываются.
-
-    Args:
-        sheets: Словарь {имя_листа: [row_dict, ...]}, где row_dict —
-            результат `read_sheet_as_dicts` (ключи = имена полей из строки 2).
-            Пример: {"YW3PF": [{"YW3ANR": "F0ICRG20S210", "YW3AB2": "0880", ...}]}
+        1. Для каждого листа из ``ACCOUNT_SOURCE_SHEETS`` по ``SHEET_FIELD_PREFIX``
+           находим слоты с полными тройками AB/AN/AS или BB/BN/BS (regex: суффикс
+           слота после буквенной группы допускает быть пустым — для колонок вида ``YWJ1AB``).
+        2. Слот без полной тройки отбрасывается (защита от полей вроде ``YW3ANR``).
+        3. Если ``(c_AB, c_AN, c_AS)`` не входит в allowlist — слот пропускается.
+        4. Из ячеек читаются значения; в множество добавляется пара
+           ``((c_AB, c_AN, c_AS), (SCAB, SCAN, SCAS))`` при непустой тройке значений.
+        5. Группы A и B сливаются в одно множество: JOIN с SCPF/S5PF всегда по значениям SC*.
 
     Returns:
-        Множество уникальных троек (AB, AN, AS) в виде строк. Пример:
-        {("0880", "AUDE75", "006"), ("9053", "AUDE75", "004"), ...}
+        Множество ``((имена колонок), (значения для JOIN))``. Пример элемента:
+        ``(("YW3AB2", "YW3AN2", "YW3AS2"), ("0880", "AUDE75", "006"))``.
 
     Example:
         >>> sheets = {"YW3PF": [{"YW3AB2": "0880", "YW3AN2": "AUDE75",
         ...                      "YW3AS2": "006", "YW3ANR": "ignored"}]}
         >>> extract_all_accounts(sheets)
-        {('0880', 'AUDE75', '006')}
+        {(('YW3AB2', 'YW3AN2', 'YW3AS2'), ('0880', 'AUDE75', '006'))}
     """
     ...
 ```
@@ -322,13 +329,16 @@ def extract_all_accounts(sheets: dict[str, list[dict]]) -> set[tuple[str, str, s
 load_workbook(path)
  └─► read_all_sheets() ──► dict[sheet_name, list[dict]]  # строки как dict по заголовкам
        │
-       ├─► extract_accounts(sheets=[YW2PF, YW3PF, YWJ1PF]) ──► set[(AB,AN,AS)]
+       ├─► extract_all_accounts(sheets=[YW2PF, YW3PF, YWJ1PF])
+       │      ──► set[((c_AB,c_AN,c_AS), (SCAB,SCAN,SCAS))]   # только allowlist
        │
        ├─► determine_conditional_sheets(yw2pf_row)         ──► list[sheet_name]
        │
        ├─► build_account_table(accounts, SCPF, S5PF)        ──► pandas.DataFrame
+       │      (сортировка строк по ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED;
+       │       колонка «Ключ полей PF» = имена полей через «-»)
        │
-       └─► write_to_yw2pf(wb, blocks, account_table, account_ranges)
+       └─► write_to_yw2pf(wb, blocks, account_table, …)
              ├─► append YW3PF (header+data)
              ├─► append YWJ1PF (header+data)
              ├─► append AN6PF  (conditional)
@@ -389,65 +399,52 @@ def read_sheet_as_dicts(wb, sheet_name: str) -> list[dict]:
 
 ### 6.3. Извлечение счетов (`account_extractor.py`)
 
-**Ключевая логика — найти слоты, где на листе присутствуют ВСЕ три поля тройки (AB+AN+AS или BB+BN+BS).** Это страхует от ложных срабатываний типа `YW3ANR` (client agreement ID).
+**Ключевая логика:**
+
+1. Найти слоты, где на листе присутствуют **все три** поля тройки (AB+AN+AS или BB+BN+BS) — иначе поля вроде `YW3ANR` не образуют ложный счёт.
+2. Регулярное выражение для заголовка: `^{prefix}(AB|AN|AS|BB|BN|BS)(.*)$` — суффикс после буквенной группы может быть **пустым** (колонки `YWJ1AB`, `YWJ1AN`, `YWJ1AS`).
+3. Учитывать только тройки имён колонок из **`ALLOWED_ACCOUNT_FIELD_TRIPLES`** (множество строится из **`ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED`** в `config.py`).
+4. В результат попадают пары **(тройка имён колонок, тройка значений ячеек)**; пустые тройки значений отбрасываются.
 
 ```python
 import re
 
-def extract_account_slots(headers: list[str], sheet_prefix: str) -> list[tuple[str, tuple]]:
-    """
-    Возвращает список (slot_id, (col_AB, col_AN, col_AS)) для каждого слота,
-    где все три колонки существуют на листе.
-    sheet_prefix = 'YW2' | 'YW3' | 'YWJ1'
-    """
-    slots = {}  # slot_id -> {'AB': header, 'AN': ..., 'AS': ..., 'BB':...}
-    pat = re.compile(rf"^{re.escape(sheet_prefix)}(AB|AN|AS|BB|BN|BS)(.+)$")
+def extract_account_slots(headers, sheet_prefix: str):
+    slots = {}
+    pat = re.compile(rf"^{re.escape(sheet_prefix)}(AB|AN|AS|BB|BN|BS)(.*)$")
     for h in headers:
-        if h is None: continue
+        if h is None:
+            continue
         m = pat.match(str(h))
-        if not m: continue
+        if not m:
+            continue
         kind, slot = m.group(1), m.group(2)
         slots.setdefault(slot, {})[kind] = h
-
     result = []
     for slot, kinds in slots.items():
-        # полная тройка A
         if {"AB", "AN", "AS"} <= kinds.keys():
             result.append((slot, "A", (kinds["AB"], kinds["AN"], kinds["AS"])))
-        # полная тройка B
         if {"BB", "BN", "BS"} <= kinds.keys():
             result.append((slot, "B", (kinds["BB"], kinds["BN"], kinds["BS"])))
     return result
 
 
-def extract_all_accounts(sheets: dict[str, list[dict]]) -> set[tuple[str, str, str]]:
-    """
-    Возвращает уникальные тройки (AB, AN, AS) или (BB, BN, BS) со всех строк
-    листов YW2PF, YW3PF, YWJ1PF. Пустые тройки (все три пустые) отбрасываются.
-    """
+def extract_all_accounts(sheets):
+    """Итерация по ACCOUNT_SOURCE_SHEETS и SHEET_FIELD_PREFIX — см. реальный модуль."""
     accounts = set()
-    SHEET_PREFIX = {"YW2PF": "YW2", "YW3PF": "YW3", "YWJ1PF": "YWJ1"}
-    for sheet_name, rows in sheets.items():
-        if sheet_name not in SHEET_PREFIX: continue
-        prefix = SHEET_PREFIX[sheet_name]
-        # получить headers из первой строки
-        if not rows: continue
-        headers = list(rows[0].keys())
-        slots = extract_account_slots(headers, prefix)
+    for sheet_name in ACCOUNT_SOURCE_SHEETS:
+        # ...
         for row in rows:
-            for slot_id, group, (c1, c2, c3) in slots:
-                v1, v2, v3 = row.get(c1), row.get(c2), row.get(c3)
-                triple = tuple(_norm(v) for v in (v1, v2, v3))
-                if any(triple):   # хотя бы одно не пустое
-                    accounts.add(triple)
+            for _slot_id, _group, (c1, c2, c3) in slots:
+                if (c1, c2, c3) not in ALLOWED_ACCOUNT_FIELD_TRIPLES:
+                    continue
+                triple = (_norm(row.get(c1)), _norm(row.get(c2)), _norm(row.get(c3)))
+                if any(triple):
+                    accounts.add(((c1, c2, c3), triple))
     return accounts
-
-
-def _norm(v) -> str:
-    return "" if v is None else str(v).strip()
 ```
 
-**Важно.** Ключ `(AB, AN, AS)` и `(BB, BN, BS)` — разные «виды» счёта, но при сопоставлении с `SCPF`/`S5PF` матчим по одинаковым колонкам `SCAB/SCAN/SCAS` и `S5AB/S5AN/S5AS`. Следовательно, при JOIN группу A и B сливаем в один общий set троек — это явно указано в ТЗ.
+**Важно.** Значения из групп A и B сопоставляются с `SCPF`/`S5PF` по одному и тому же ключу `SCAB/SCAN/SCAS`. Разные тройки **имён** колонок с одинаковыми **значениями** дают **разные строки** в таблице на выходе (разный «Ключ полей PF»).
 
 ### 6.4. Условное добавление AN6PF / AN9PF
 
@@ -464,88 +461,32 @@ def _is_blank(v) -> bool:
 import pandas as pd
 
 def build_account_table(
-    accounts: set[tuple[str, str, str]],
+    accounts: set[tuple[tuple[str, str, str], tuple[str, str, str]]],
     sc_rows: list[dict],
     s5_rows: list[dict],
 ) -> pd.DataFrame:
-    """Строит итоговую таблицу счетов через LEFT JOIN SCPF + LEFT JOIN S5PF.
+    """LEFT JOIN SCPF + LEFT JOIN S5PF по (SCAB, SCAN, SCAS).
 
-    ТЗ: «По каждому счету с Листа SCPF и S5PF по ключу AB*,AN*,AS* или
-    BB*,BN*,BS* = SCAB,SCAN,SCAS и S5AB,S5AN,S5AS надо перенести данные
-    на Лист YW2PF следующие поля (не все счета есть в S5PF):
-    SCAB,SCAN,SCAS, SCACT, SCSAC,SCNANC, SCCCY, SCBAL,SCSUM0, SCSUMD,
-    SCSUMC,SCRBA, S5BAL, S5AIMD, S5AM1D, -(S5AIMD+S5AM1D)».
+    Отличия от базового ТЗ в реализации:
+        - Вход: ``accounts`` — множество ``((c_AB, c_AN, c_AS), (SCAB, SCAN, SCAS))``.
+        - Строки сортируются по индексу тройки колонок в
+          ``ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED``.
+        - В ``acc_df`` добавляется колонка ``ACCOUNT_FIELD_KEY_HEADER`` («Ключ полей PF»):
+          ``f"{c1}-{c2}-{c3}"`` для наглядности в Excel.
+        - Итоговый порядок колонок: «Ключ полей PF», SCAB…S5AM1D (как в коде).
+        - Колонка ``-(S5AIMD+S5AM1D)`` по-прежнему пишется в ``writer.py`` формулой.
 
-    Алгоритм:
-        1. accounts → DataFrame с колонками [SCAB, SCAN, SCAS].
-        2. LEFT JOIN к SCPF по (SCAB, SCAN, SCAS) — берём перечисленные
-           в ТЗ колонки SC*. Счёт, которого нет в SCPF, даст NaN по
-           всем SC-колонкам (это нештатная ситуация — логируем WARNING).
-        3. LEFT JOIN к S5PF по тому же ключу (поля S5AB/S5AN/S5AS
-           переименовываются под SC* для merge). Счёт, которого нет
-           в S5PF, даст NaN в S5BAL/S5AIMD/S5AM1D — это штатный случай
-           согласно ТЗ.
-        4. Колонка -(S5AIMD+S5AM1D) НЕ вычисляется здесь — её пишет
-           writer.py как Excel-формулу при записи на лист.
-
-    Нормализация ключей:
-        Все компоненты ключа приводятся к строке и обрезаются от
-        крайних пробелов (`.strip()`), чтобы '001' и ' 001 ' считались
-        одним и тем же счётом. Case-sensitive сравнение сохраняется.
-
-    Args:
-        accounts: Множество уникальных ключей счетов из extract_all_accounts.
-        sc_rows: Все data-строки SCPF (по одной на счёт в системе).
-        s5_rows: Все data-строки S5PF (их меньше, чем в SCPF).
-
-    Returns:
-        DataFrame с колонками (в порядке, заданном в config.ACCOUNT_TABLE_COLUMNS,
-        кроме COMPUTED): SCAB, SCAN, SCAS, SCACT, SCSAC, SCNANC, SCCCY,
-        SCBAL, SCSUM0, SCSUMD, SCSUMC, SCRBA, S5BAL, S5AIMD, S5AM1D.
-        Колонка -(S5AIMD+S5AM1D) добавляется writer'ом.
+    Алгоритм (сжато):
+        1. Отсортировать ``accounts`` по порядку в ``ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED``.
+        2. Построить ``acc_df`` с колонками ключ + SCAB, SCAN, SCAS.
+        3. Нормализовать ключи (строка, ``.strip()``) в sc_df, s5_df, acc_df.
+        4. ``drop_duplicates`` по ключу в справочниках; предупреждение, если счёта нет в SCPF.
+        5. Два последовательных ``merge(..., how="left")``; финальная перестановка колонок.
     """
-    sc_df = pd.DataFrame(sc_rows)
-    s5_df = pd.DataFrame(s5_rows)
-
-    # accounts — set троек, в DataFrame превращаем в три колонки с именами SC*
-    acc_df = pd.DataFrame(list(accounts), columns=["SCAB", "SCAN", "SCAS"])
-
-    # Нормализация всех ключей к строке + .strip() для обеих таблиц и acc_df
-    for df, cols in [
-        (sc_df, ["SCAB", "SCAN", "SCAS"]),
-        (s5_df, ["S5AB", "S5AN", "S5AS"]),
-        (acc_df, ["SCAB", "SCAN", "SCAS"]),
-    ]:
-        for c in cols:
-            if c in df.columns:
-                df[c] = df[c].astype(str).str.strip()
-
-    # --- LEFT JOIN 1: SCPF (обязательный источник) -----------------------
-    # Берём только те SC-колонки, которые явно перечислены в ТЗ
-    sc_sub = sc_df[[
-        "SCAB", "SCAN", "SCAS",       # ключ
-        "SCACT", "SCSAC", "SCNANC",   # ТЗ
-        "SCCCY", "SCBAL", "SCSUM0",   # ТЗ: валюта, остаток, сумма0
-        "SCSUMD", "SCSUMC", "SCRBA",  # ТЗ: суммы дебет/кредит, RBA
-    ]]
-    merged = acc_df.merge(sc_sub, on=["SCAB", "SCAN", "SCAS"], how="left")
-
-    # --- LEFT JOIN 2: S5PF (опциональный — ТЗ: «не все счета есть в S5PF»)
-    # Переименовываем ключи S5* → SC*, чтобы merge отработал
-    s5_sub = s5_df[["S5AB", "S5AN", "S5AS", "S5BAL", "S5AIMD", "S5AM1D"]].rename(
-        columns={"S5AB": "SCAB", "S5AN": "SCAN", "S5AS": "SCAS"}
-    )
-    merged = merged.merge(s5_sub, on=["SCAB", "SCAN", "SCAS"], how="left")
-
-    # Итоговый порядок колонок (строго по ТЗ). Формулу -(S5AIMD+S5AM1D)
-    # добавит writer.py как Excel-формулу, не как посчитанное значение.
-    merged = merged[[
-        "SCAB", "SCAN", "SCAS", "SCACT", "SCSAC", "SCNANC",
-        "SCCCY", "SCBAL", "SCSUM0", "SCSUMD", "SCSUMC", "SCRBA",
-        "S5BAL", "S5AIMD", "S5AM1D",
-    ]]
-    return merged
+    ...
 ```
+
+Реальные имена колонок SCPF/S5PF и список полей merge — в ``SCPF_MERGE_COLUMNS`` / ``S5PF_MERGE_COLUMNS`` (`config.py`).
 
 ### 6.6. Запись в YW2PF (`writer.py`)
 
@@ -554,8 +495,8 @@ def build_account_table(
 - **Идемпотентность (критично при перезаписи исходника):** перед записью вызываем `_strip_previous_run(ws)` — удаляем все строки от первого `[XA:*]` маркера вниз. Это позволяет безопасно запускать обработку повторно: результаты прошлого запуска вычищаются, накатывается актуальный.
 - Находим `last_data_row` через перебор с конца до первой непустой строки (после очистки).
 - Каждый блок: 1 пустая строка → маркер `[XA:YW3PF]` жирным в колонке A → строка заголовков → data-строки.
-- Для столбца `-(S5AIMD+S5AM1D)` пишем **Excel-формулу**, не посчитанное значение (ссылки на ячейки той же строки).
-- К диапазону таблицы счетов применяем `ws.auto_filter.ref = "A{start}:P{end}"`.
+- Для столбца `-(S5AIMD+S5AM1D)` пишем **Excel-формулу**, не посчитанное значение (ссылки на ячейки той же строки). Индексы колонок `S5AIMD` и `S5AM1D` берутся из `account_df.columns` (после добавления «Ключ полей PF» сдвиг относительно фиксированных 14/15).
+- К диапазону таблицы счетов применяем автофильтр от первой колонки до последней **включая** столбец с формулой (в коде — `get_column_letter` по фактическому числу колонок).
 
 ```python
 from openpyxl.styles import Font
@@ -629,10 +570,10 @@ def write_blocks_to_yw2pf(wb, ordered_blocks: list, account_df):
     cursor += 1
 
     data_start = cursor
-    # колонки S5AIMD и S5AM1D — 14 и 15 (A=1). Формула ссылается на текущую строку.
-    s5aimd_col_letter = get_column_letter(14)
-    s5am1d_col_letter = get_column_letter(15)
-    neg_col_idx = 16
+    # Индексы S5AIMD / S5AM1D — по имени в account_df (не хардкод 14/15).
+    s5aimd_col_letter = get_column_letter(list(account_df.columns).index("S5AIMD") + 1)
+    s5am1d_col_letter = get_column_letter(list(account_df.columns).index("S5AM1D") + 1)
+    neg_col_idx = len(account_df.columns) + 1
 
     for _, rec in account_df.iterrows():
         for ci, col in enumerate(account_df.columns, start=1):
@@ -745,11 +686,12 @@ def safe_overwrite_save(wb, original_path: str) -> dict:
 | 2 | **Одна пустая строка перед каждым** новым блоком. Константа `BLOCK_GAP = 1`. |
 | 3 | **Перезапись исходника**. Перед записью автоматический бэкап `*.backup_<timestamp>.xlsx` + атомарная запись через `.tmp` + `os.replace` (см. 6.8). |
 | 4 | **Идемпотентность при повторных запусках:** блоки маркируются `[XA:<имя>]` в колонке A. Перед записью все строки от первого маркера и ниже чистятся (см. `_strip_previous_run` в 6.6). |
+| 5 | **Счета с PF-листов:** извлекаются только тройки колонок из `ALLOWED_ACCOUNT_FIELD_TRIPLES`; порядок строк в таблице ACCOUNTS = `ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED`; первая колонка таблицы — «Ключ полей PF» (`имя1-имя2-имя3`). |
 
 ### 8.2. Мелкие вопросы (не блокируют старт — закладываю дефолт, скажи если не подходит)
 
 1. **Маркеры блоков `[XA:YW3PF]`, `[XA:ACCOUNTS]` жирным в колонке A.** Нужны для идемпотентности и ориентира. Убрать визуально (оставить, но белым цветом) — могу, просто скажи.
-2. **Дубликаты счетов.** Одну и ту же тройку `(AB,AN,AS)` с разных листов сворачиваем в один set → один ряд в таблице счетов. OK?
+2. **Дубликаты.** Одна и та же пара `(тройка имён колонок, тройка значений)` со всех строк и листов сворачивается в один элемент множества → одна строка в таблице. Совпадающие **значения** при разных **именах** колонок (две строки allowlist) → две строки с разным «Ключ полей PF». OK?
 3. **Сравнение ключей — строгое, строковое, с `.strip()`.** Ведущие нули (`'001'`, `'002'`) сохраняются. Регистр важен. OK?
 4. **Автофильтр** накладываю **только** на таблицу `[XA:ACCOUNTS]`. В блоках YW3/YWJ1/AN6/AN9 по 1–4 строки — фильтр не нужен.
 5. **Если блок счетов пуст** (ни одного счёта не извлеклось) — пропускаю, записываю только остальные блоки. Лог INFO.
@@ -835,8 +777,8 @@ pytest -v tests/
 | 2 | `config.py` — все константы (имена листов, поля, префиксы) | `src/core/config.py` | Константы отделены от логики |
 | 3 | `logging_setup.py` — loguru с файловым синком | `src/utils/logging_setup.py` | `logger.info(...)` пишет и в stderr, и в файл |
 | 4 | `sheet_reader.py` + тест | `src/core/sheet_reader.py`, `tests/test_sheet_reader.py` | На тестовом файле возвращает корректный `list[dict]` |
-| 5 | `account_extractor.py` + тесты (включая кейс `YW3ANR`, который НЕ должен попасть в счета; и кейс YWJ1PF с 0/1/N data-строками) | `src/core/account_extractor.py` | Из примера извлекается ≥ 10 уникальных троек; `YW3ANR` отсутствует; код корректно работает на листах с разным числом строк |
-| 6 | `joiner.py` + тест на LEFT JOIN (S5 отсутствует — NaN) | `src/core/joiner.py` | DataFrame с нужным порядком колонок |
+| 5 | `account_extractor.py` + тесты (включая `YW3ANR`, allowlist, `YWJ1AB` без суффикса; YWJ1PF с 0/1/N data-строками) | `src/core/account_extractor.py` | Учитываются только allowlist-тройки; лишние колонки не попадают в счета |
+| 6 | `joiner.py` + тест на LEFT JOIN (S5 отсутствует — NaN), колонка «Ключ полей PF», сортировка | `src/core/joiner.py` | DataFrame: ключ + SC*…S5* в порядке `ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED` |
 | 7 | `writer.py` — запись блоков с маркерами `[XA:*]`, формулой и автофильтром + `_strip_previous_run` для идемпотентности | `src/core/writer.py` | Повторный запуск на уже обработанном файле даёт тот же результат, а не удваивает блоки |
 | 8 | `pipeline.py` — оркестрация + `safe_overwrite_save` (бэкап + lock-check + атомарная запись через `.tmp`) + колбэк прогресса (%) | `src/core/pipeline.py` | Из CLI (`python -m src.core.pipeline file.xlsx`) работает без GUI; при открытом в Excel файле даёт понятную ошибку, файл не трогается |
 | 9 | `gui/app.py` — customtkinter, 2 кнопки, прогресс, лог-вьюшка, поток, диалог подтверждения перезаписи | `src/gui/app.py` | GUI запускает pipeline без фриза окна; по завершении показывает путь к бэкапу |
@@ -853,7 +795,7 @@ pytest -v tests/
 - [ ] Перед записью автоматически создан бэкап `<имя>.backup_<timestamp>.xlsx` рядом с исходником.
 - [ ] На `YW2PF` ниже исходных данных (через 1 пустую строку перед каждым блоком) появились блоки `YW3PF`, `YWJ1PF`, опционально `AN6PF` (если `YW2PR2 ≠ ""`), опционально `AN9PF` (если `YW2PRZ5 ≠ ""`), и таблица счетов.
 - [ ] Каждый блок помечен маркером `[XA:<имя>]` в колонке A.
-- [ ] Таблица счетов содержит колонки в порядке ТЗ, включая вычисляемый столбец `-(S5AIMD+S5AM1D)` как Excel-формулу.
+- [ ] Таблица счетов начинается с колонки «Ключ полей PF»; далее колонки в порядке ТЗ; строки в порядке `ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED`; вычисляемый столбец `-(S5AIMD+S5AM1D)` — Excel-формула.
 - [ ] На диапазон таблицы счетов наложен автофильтр.
 - [ ] **Идемпотентность:** повторный запуск на том же файле даёт тот же результат (блоки не удваиваются).
 - [ ] Если файл открыт в Excel — приложение выдаёт понятную ошибку и НЕ портит файл и НЕ создаёт бэкап.

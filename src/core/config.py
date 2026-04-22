@@ -47,6 +47,30 @@ SHEET_FIELD_PREFIX: dict[str, str] = {
     "YWJ1PF": "YWJ1",
 }
 
+ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED: tuple[tuple[str, str, str], ...] = (
+    ("YW3AB2", "YW3AN2", "YW3AS2"),
+    ("YWJ1AB", "YWJ1AN", "YWJ1AS"),
+    ("YW3AB4", "YW3AN4", "YW3AS4"),
+    ("YW3AB3", "YW3AN3", "YW3AS3"),
+    ("YW3AB5", "YW3AN5", "YW3AS5"),
+    ("YWJ1AB2", "YWJ1AN2", "YWJ1AS2"),
+    ("YW3AB8", "YW3AN8", "YW3AS8"),
+    ("YW3ABL", "YW3ANL", "YW3ASL"),
+    ("YW3ABO", "YW3ANO", "YW3ASO"),
+    ("YW3BB4", "YW3BN4", "YW3BS4"),
+    ("YW3BB5", "YW3BN5", "YW3BS5"),
+    ("YW3BB6", "YW3BN6", "YW3BS6"),
+)
+"""Порядок троек полей: строки таблицы счетов на выходе сортируются так же."""
+
+ALLOWED_ACCOUNT_FIELD_TRIPLES: frozenset[tuple[str, str, str]] = frozenset(
+    ALLOWED_ACCOUNT_FIELD_TRIPLES_ORDERED
+)
+"""Только эти тройки полей участвуют в извлечении ключей счетов с PF-листов."""
+
+ACCOUNT_FIELD_KEY_HEADER = "Ключ полей PF"
+"""Заголовок колонки: имена полей AB/AN/AS (или BB/BN/BS) через дефис, напр. ``YW3AB2-YW3AN2-YW3AS2``."""
+
 # =============================================================================
 # Метаданные листов (общая структура для всех PF-листов)
 # =============================================================================

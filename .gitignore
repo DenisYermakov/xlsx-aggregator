@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.spec
+# Excel lock-файл при открытой книге
+~$*
+# Локальные бэкапы, созданные агрегатором
+*.backup_*.xlsx
+# Excel (по запросу — в репозиторий не коммитим)
+*.xls
+*.xlsx
